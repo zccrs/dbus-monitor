@@ -124,6 +124,9 @@ monitor_bus() {
     declare -A seen_calls
     local last_output_time=0
 
+    # 添加调试信息
+    echo -e "${GREEN}[信息]${NC} 正在启动 $bus_type bus 监控..." >&2
+
     # 如果是 system bus，检查权限
     if [ "$bus_type" = "system" ]; then
         if ! check_root; then
@@ -132,8 +135,15 @@ monitor_bus() {
         fi
     fi
 
-    dbus-monitor --"$bus_type" "type='method_call'" 2>/dev/null | \
+    # 使用管道执行 dbus-monitor 并检查其状态
+    ( dbus-monitor --"$bus_type" "type='method_call'" 2>/dev/null || echo -e "${RED}[错误]${NC} dbus-monitor 命令执行失败" >&2 ) | \
     while IFS= read -r line; do
+        # 添加调试信息（仅输出前几行以确认监控正在工作）
+        if [ $last_output_time -eq 0 ]; then
+            echo -e "${GREEN}[信息]${NC} $bus_type bus 监控已开始接收数据" >&2
+            last_output_time=$(date +%s)
+        fi
+
         if [[ $line =~ ^method.call.* ]]; then
             # 直接从方法调用行提取所需信息
             local sender destination path interface
@@ -153,6 +163,12 @@ monitor_bus() {
                     --type=method_call --print-reply /org/freedesktop/DBus \
                     org.freedesktop.DBus.GetConnectionUnixProcessID "string:$sender" 2>/dev/null |
                     awk '/uint32/{print $2}')
+
+                # 添加更详细的调试信息
+                if [ -z "$pid" ]; then
+                    echo -e "${YELLOW}[调试]${NC} 无法获取进程 ID: $sender" >&2
+                    continue
+                fi
 
                 if [ ! -z "$pid" ] && [ -e "/proc/$pid/cmdline" ]; then
                     local cmdline service_name call_id timestamp current_time
@@ -180,6 +196,12 @@ monitor_bus() {
             fi
         fi
     done
+
+    # 如果监控进程异常退出，输出错误信息
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[错误]${NC} $bus_type bus 监控意外停止" >&2
+        return 1
+    fi
 }
 
 # 显示用法信息
