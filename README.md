@@ -9,7 +9,7 @@
 ## 使用方法
 
 ```bash
-./dbus-monitor.sh
+sudo ./dbus-monitor.sh
 ```
 
 输出格式为：
