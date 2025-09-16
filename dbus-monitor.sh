@@ -283,6 +283,28 @@ monitor_sessions() {
     done
 }
 
+# 获取进程信息（保留monitor_login1_release_session_simple.sh的格式）
+get_process_info() {
+    local pid="$1"
+    if [[ -d "/proc/$pid" ]]; then
+        echo "  Process Info:"
+        echo "    PID: $pid"
+        if [[ -r "/proc/$pid/cmdline" ]]; then
+            local cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//')
+            echo "    Command: $cmdline"
+        fi
+        if [[ -r "/proc/$pid/comm" ]]; then
+            echo "    Name: $(cat /proc/$pid/comm)"
+        fi
+        if [[ -r "/proc/$pid/exe" ]]; then
+            local exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null)
+            [[ -n "$exe" ]] && echo "    Executable: $exe"
+        fi
+    else
+        echo "  Process not found or access denied"
+    fi
+}
+
 # 获取 DBus 连接的进程 ID
 get_connection_pid() {
     local bus_type="$1"
@@ -342,13 +364,36 @@ monitor_bus() {
     # 添加调试信息
     echo -e "${GREEN}[信息]${NC} 正在启动 $bus_type bus 监控..." >&2
 
+    # 检查是否启用了过滤模式（类似monitor_login1_release_session_simple.sh）
+    local is_filtered_mode=false
+    if [ ! -z "$FILTER_BUS_NAME" ] || [ ! -z "$FILTER_OBJECT_PATH" ] || [ ! -z "$FILTER_INTERFACE" ] || [ ! -z "$FILTER_METHOD" ]; then
+        is_filtered_mode=true
+    fi
+
+    # 构建监控命令
+    local filter_conditions="type='method_call'"
+    
+    # 如果指定了过滤参数，添加到监控条件中
+    if [ ! -z "$FILTER_BUS_NAME" ]; then
+        filter_conditions="${filter_conditions},destination='${FILTER_BUS_NAME}'"
+    fi
+    if [ ! -z "$FILTER_OBJECT_PATH" ]; then
+        filter_conditions="${filter_conditions},path='${FILTER_OBJECT_PATH}'"
+    fi
+    if [ ! -z "$FILTER_INTERFACE" ]; then
+        filter_conditions="${filter_conditions},interface='${FILTER_INTERFACE}'"
+    fi
+    if [ ! -z "$FILTER_METHOD" ]; then
+        filter_conditions="${filter_conditions},member='${FILTER_METHOD}'"
+    fi
+
     if [ "$bus_type" = "system" ]; then
         if ! check_root; then
             echo -e "${YELLOW}[警告]${NC} 没有 root 权限，将只监控 session bus" >&2
             return 1
         fi
         # 系统总线监控命令
-        monitor_cmd="dbus-monitor --system type='method_call'"
+        monitor_cmd="dbus-monitor --system ${filter_conditions}"
     else
         # session 总线监控需要特殊处理
         if [ ! -z "$SUDO_USER" ]; then
@@ -358,9 +403,9 @@ monitor_bus() {
                 return 1
             fi
             # 使用 sudo -u 运行 session 总线监控
-            monitor_cmd="sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS='$session_bus_addr' dbus-monitor --session type='method_call'"
+            monitor_cmd="sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS='$session_bus_addr' dbus-monitor --session ${filter_conditions}"
         else
-            monitor_cmd="dbus-monitor --session type='method_call'"
+            monitor_cmd="dbus-monitor --session ${filter_conditions}"
         fi
     fi
 
@@ -394,32 +439,53 @@ monitor_bus() {
                     pid=$(get_connection_pid "$bus_type" "$sender")
                 fi
 
-                # 即使获取不到 pid，也尝试输出调用信息
-                local timestamp=$(date '+%H:%M:%S')
-                local service_name=$(get_service_name "$bus_type" "$destination")
-                local cmdline=""
-
-                if [ ! -z "$pid" ] && [ -e "/proc/$pid/cmdline" ]; then
-                    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//')
-                else
-                    cmdline="[未知进程]"
-                fi
-
-                # 生成调用的唯一标识符并检查是否已经看到过这个调用
-                call_id=$(generate_call_id "$cmdline" "$service_name" "$path" "$interface")
-                current_time=$(date +%s)
-
-                # 如果这个调用已经超过5秒没有出现过，重置其状态
-                if [ -n "${seen_calls[$call_id]}" ]; then
-                    local last_time=${seen_calls[$call_id]}
-                    if [ $((current_time - last_time)) -ge 5 ]; then
-                        unset seen_calls[$call_id]
+                # 根据是否启用过滤模式选择输出格式
+                if [ "$is_filtered_mode" = true ]; then
+                    # 使用monitor_login1_release_session_simple.sh的输出格式
+                    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+                    echo "[$timestamp] $interface method call detected"
+                    echo "  Sender: $sender"
+                    
+                    # 如果sender是unique name，获取PID
+                    if [[ "$sender" =~ ^: ]]; then
+                        echo "  Getting PID for sender: $sender"
+                        if [ ! -z "$pid" ] && [[ "$pid" =~ ^[0-9]+$ ]]; then
+                            echo "  Found PID: '$pid'"
+                            echo "  Process ID: $pid"
+                            get_process_info "$pid"
+                        else
+                            echo "  Failed to get PID"
+                        fi
                     fi
-                fi
+                    echo "----------------------------------------"
+                else
+                    # 使用原有的输出格式
+                    local timestamp=$(date '+%H:%M:%S')
+                    local service_name=$(get_service_name "$bus_type" "$destination")
+                    local cmdline=""
 
-                if [ -z "${seen_calls[$call_id]}" ]; then
-                    seen_calls[$call_id]=$current_time
-                    echo -e "${YELLOW}[$timestamp]${NC} ${GREEN}[$bus_type]${NC} ${BLUE}$cmdline${NC} -> \"$service_name\" \"$path\" \"$interface\""
+                    if [ ! -z "$pid" ] && [ -e "/proc/$pid/cmdline" ]; then
+                        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//')
+                    else
+                        cmdline="[未知进程]"
+                    fi
+
+                    # 生成调用的唯一标识符并检查是否已经看到过这个调用
+                    call_id=$(generate_call_id "$cmdline" "$service_name" "$path" "$interface")
+                    current_time=$(date +%s)
+
+                    # 如果这个调用已经超过5秒没有出现过，重置其状态
+                    if [ -n "${seen_calls[$call_id]}" ]; then
+                        local last_time=${seen_calls[$call_id]}
+                        if [ $((current_time - last_time)) -ge 5 ]; then
+                            unset seen_calls[$call_id]
+                        fi
+                    fi
+
+                    if [ -z "${seen_calls[$call_id]}" ]; then
+                        seen_calls[$call_id]=$current_time
+                        echo -e "${YELLOW}[$timestamp]${NC} ${GREEN}[$bus_type]${NC} ${BLUE}$cmdline${NC} -> \"$service_name\" \"$path\" \"$interface\""
+                    fi
                 fi
             fi
         fi
@@ -438,16 +504,29 @@ show_usage() {
     echo "选项:"
     echo "  -s, --system    只监控系统总线 (需要 root 权限)"
     echo "  -u, --user      只监控用户会话总线"
+    echo "  --session       只监控用户级服务（会话总线）"
+    echo "  --system        只监控系统级服务（系统总线）"
+    echo "  -n <名称>       指定要监控的BUS名称 (默认: 监控所有)"
+    echo "  -p <路径>       指定要监控的对象路径 (默认: 监控所有)"
+    echo "  -i <接口>       指定要监控的接口 (默认: 监控所有)"
+    echo "  -m <方法>       指定要监控的方法 (默认: 监控所有)"
     echo "  -h, --help      显示此帮助信息"
     echo ""
     echo "不带参数运行时:"
     echo "- 如果有 root 权限，将同时监控系统总线和会话总线"
     echo "- 如果没有 root 权限，将只监控会话总线"
+    echo ""
+    echo "使用 -n/-p/-i/-m 参数时，将只监控匹配的DBus调用"
 }
 
 # 参数解析
 MONITOR_SYSTEM=true
 MONITOR_SESSION=true
+# 新增过滤参数
+FILTER_BUS_NAME=""
+FILTER_OBJECT_PATH=""
+FILTER_INTERFACE=""
+FILTER_METHOD=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -458,6 +537,32 @@ while [[ $# -gt 0 ]]; do
         -u|--user)
             MONITOR_SYSTEM=false
             shift
+            ;;
+        --session)
+            MONITOR_SYSTEM=false
+            MONITOR_SESSION=true
+            shift
+            ;;
+        --system)
+            MONITOR_SESSION=false
+            MONITOR_SYSTEM=true
+            shift
+            ;;
+        -n)
+            FILTER_BUS_NAME="$2"
+            shift 2
+            ;;
+        -p)
+            FILTER_OBJECT_PATH="$2"
+            shift 2
+            ;;
+        -i)
+            FILTER_INTERFACE="$2"
+            shift 2
+            ;;
+        -m)
+            FILTER_METHOD="$2"
+            shift 2
             ;;
         -h|--help)
             show_usage
@@ -485,6 +590,16 @@ fi
 if [ "$MONITOR_SESSION" = true ]; then
     echo -e "- ${GREEN}会话总线${NC} (已启用)" >&2
 fi
+
+# 显示过滤条件
+if [ ! -z "$FILTER_BUS_NAME" ] || [ ! -z "$FILTER_OBJECT_PATH" ] || [ ! -z "$FILTER_INTERFACE" ] || [ ! -z "$FILTER_METHOD" ]; then
+    echo -e "\033[1m过滤条件:\033[0m" >&2
+    [ ! -z "$FILTER_BUS_NAME" ] && echo -e "- BUS名称: ${YELLOW}$FILTER_BUS_NAME${NC}" >&2
+    [ ! -z "$FILTER_OBJECT_PATH" ] && echo -e "- 对象路径: ${YELLOW}$FILTER_OBJECT_PATH${NC}" >&2
+    [ ! -z "$FILTER_INTERFACE" ] && echo -e "- 接口: ${YELLOW}$FILTER_INTERFACE${NC}" >&2
+    [ ! -z "$FILTER_METHOD" ] && echo -e "- 方法: ${YELLOW}$FILTER_METHOD${NC}" >&2
+fi
+
 echo -e "\033[1m输出格式:\033[0m" >&2
 echo -e "${YELLOW}[时间]${NC} ${GREEN}[总线类型]${NC} ${BLUE}调用方命令行${NC} -> \"服务名称\" \"对象路径\" \"接口名称\"" >&2
 echo -e "\033[1m按 Ctrl+C 停止监控\033[0m" >&2
@@ -848,7 +963,7 @@ get_connection_pid() {
     echo "$pid"
 }
 
-# 监控总线的函数
+# 监控总线的函数（参考monitor_login1_release_session_simple.sh的实现）
 monitor_bus() {
     local bus_type="$1"
     declare -A seen_calls
@@ -857,13 +972,36 @@ monitor_bus() {
     # 添加调试信息
     echo -e "${GREEN}[信息]${NC} 正在启动 $bus_type bus 监控..." >&2
 
+    # 检查是否启用了过滤模式（类似monitor_login1_release_session_simple.sh）
+    local is_filtered_mode=false
+    if [ ! -z "$FILTER_BUS_NAME" ] || [ ! -z "$FILTER_OBJECT_PATH" ] || [ ! -z "$FILTER_INTERFACE" ] || [ ! -z "$FILTER_METHOD" ]; then
+        is_filtered_mode=true
+    fi
+
+    # 构建监控命令
+    local filter_conditions="type='method_call'"
+    
+    # 如果指定了过滤参数，添加到监控条件中
+    if [ ! -z "$FILTER_BUS_NAME" ]; then
+        filter_conditions="${filter_conditions},destination='${FILTER_BUS_NAME}'"
+    fi
+    if [ ! -z "$FILTER_OBJECT_PATH" ]; then
+        filter_conditions="${filter_conditions},path='${FILTER_OBJECT_PATH}'"
+    fi
+    if [ ! -z "$FILTER_INTERFACE" ]; then
+        filter_conditions="${filter_conditions},interface='${FILTER_INTERFACE}'"
+    fi
+    if [ ! -z "$FILTER_METHOD" ]; then
+        filter_conditions="${filter_conditions},member='${FILTER_METHOD}'"
+    fi
+
     if [ "$bus_type" = "system" ]; then
         if ! check_root; then
             echo -e "${YELLOW}[警告]${NC} 没有 root 权限，将只监控 session bus" >&2
             return 1
         fi
         # 系统总线监控命令
-        monitor_cmd="dbus-monitor --system type='method_call'"
+        monitor_cmd="dbus-monitor --system ${filter_conditions}"
     else
         # session 总线监控需要特殊处理
         if [ ! -z "$SUDO_USER" ]; then
@@ -873,9 +1011,9 @@ monitor_bus() {
                 return 1
             fi
             # 使用 sudo -u 运行 session 总线监控
-            monitor_cmd="sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS='$session_bus_addr' dbus-monitor --session type='method_call'"
+            monitor_cmd="sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS='$session_bus_addr' dbus-monitor --session ${filter_conditions}"
         else
-            monitor_cmd="dbus-monitor --session type='method_call'"
+            monitor_cmd="dbus-monitor --session ${filter_conditions}"
         fi
     fi
 
@@ -888,53 +1026,88 @@ monitor_bus() {
             last_output_time=$(date +%s)
         fi
 
-        if [[ $line =~ ^method.call.* ]]; then
-            # 直接从方法调用行提取所需信息
-            local sender destination path interface
-            sender=$(echo "$line" | sed -n 's/.*sender=\([^ ]*\).*/\1/p')
-            destination=$(extract_destination "$line")
-            path=$(extract_path "$line")
-            interface=$(extract_interface "$line")
-
-            # 检查是否应该忽略这个调用
-            if should_ignore "$interface" "$destination" "$path"; then
-                continue
-            fi
-
-            if [[ $sender =~ ^:[0-9]+\.[0-9]+$ ]] && [ ! -z "$destination" ] && [ ! -z "$path" ] && [ ! -z "$interface" ]; then
-                local pid
-                if [ "$bus_type" = "session" ] && [ ! -z "$SUDO_USER" ]; then
-                    pid=$(get_connection_pid "$bus_type" "$sender" "$SUDO_USER")
-                else
-                    pid=$(get_connection_pid "$bus_type" "$sender")
-                fi
-
-                # 即使获取不到 pid，也尝试输出调用信息
-                local timestamp=$(date '+%H:%M:%S')
-                local service_name=$(get_service_name "$bus_type" "$destination")
-                local cmdline=""
-
-                if [ ! -z "$pid" ] && [ -e "/proc/$pid/cmdline" ]; then
-                    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//')
-                else
-                    cmdline="[未知进程]"
-                fi
-
-                # 生成调用的唯一标识符并检查是否已经看到过这个调用
-                call_id=$(generate_call_id "$cmdline" "$service_name" "$path" "$interface")
-                current_time=$(date +%s)
-
-                # 如果这个调用已经超过5秒没有出现过，重置其状态
-                if [ -n "${seen_calls[$call_id]}" ]; then
-                    local last_time=${seen_calls[$call_id]}
-                    if [ $((current_time - last_time)) -ge 5 ]; then
-                        unset seen_calls[$call_id]
+        if [[ $line =~ method[[:space:]]+call ]]; then
+            # 根据是否启用过滤模式选择不同的处理方式
+            if [ "$is_filtered_mode" = true ]; then
+                # 使用monitor_login1_release_session_simple.sh的输出格式
+                local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+                echo "[$timestamp] $FILTER_INTERFACE method call detected"
+                
+                # 提取sender从行中
+                local sender
+                if [[ "$line" =~ sender=([^[:space:]]+) ]]; then
+                    sender="${BASH_REMATCH[1]}"
+                    echo "  Sender: $sender"
+                    
+                    # 如果sender是unique name，获取PID
+                    if [[ "$sender" =~ ^: ]]; then
+                        echo "  Getting PID for sender: $sender"
+                        local pid
+                        # 使用busctl如果可用，否则使用dbus-send
+                        if command -v busctl >/dev/null; then
+                            pid=$(busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$sender" 2>/dev/null | grep -o '[0-9]\+')
+                        else
+                            pid=$(dbus-send --print-reply --system --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:"$sender" 2>/dev/null | grep uint32 | awk '{print $3}')
+                        fi
+                        echo "  Found PID: '$pid'"
+                        if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
+                            echo "  Process ID: $pid"
+                            get_process_info "$pid"
+                        else
+                            echo "  Failed to get PID"
+                        fi
                     fi
                 fi
+                echo "----------------------------------------"
+            else
+                # 使用原有的输出格式
+                # 直接从方法调用行提取所需信息
+                local sender destination path interface
+                sender=$(echo "$line" | sed -n 's/.*sender=\([^ ]*\).*/\1/p')
+                destination=$(extract_destination "$line")
+                path=$(extract_path "$line")
+                interface=$(extract_interface "$line")
 
-                if [ -z "${seen_calls[$call_id]}" ]; then
-                    seen_calls[$call_id]=$current_time
-                    echo -e "${YELLOW}[$timestamp]${NC} ${GREEN}[$bus_type]${NC} ${BLUE}$cmdline${NC} -> \"$service_name\" \"$path\" \"$interface\""
+                # 检查是否应该忽略这个调用
+                if should_ignore "$interface" "$destination" "$path"; then
+                    continue
+                fi
+
+                if [[ $sender =~ ^:[0-9]+\.[0-9]+$ ]] && [ ! -z "$destination" ] && [ ! -z "$path" ] && [ ! -z "$interface" ]; then
+                    local pid
+                    if [ "$bus_type" = "session" ] && [ ! -z "$SUDO_USER" ]; then
+                        pid=$(get_connection_pid "$bus_type" "$sender" "$SUDO_USER")
+                    else
+                        pid=$(get_connection_pid "$bus_type" "$sender")
+                    fi
+
+                    # 即使获取不到 pid，也尝试输出调用信息
+                    local timestamp=$(date '+%H:%M:%S')
+                    local service_name=$(get_service_name "$bus_type" "$destination")
+                    local cmdline=""
+
+                    if [ ! -z "$pid" ] && [ -e "/proc/$pid/cmdline" ]; then
+                        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//')
+                    else
+                        cmdline="[未知进程]"
+                    fi
+
+                    # 生成调用的唯一标识符并检查是否已经看到过这个调用
+                    call_id=$(generate_call_id "$cmdline" "$service_name" "$path" "$interface")
+                    current_time=$(date +%s)
+
+                    # 如果这个调用已经超过5秒没有出现过，重置其状态
+                    if [ -n "${seen_calls[$call_id]}" ]; then
+                        local last_time=${seen_calls[$call_id]}
+                        if [ $((current_time - last_time)) -ge 5 ]; then
+                            unset seen_calls[$call_id]
+                        fi
+                    fi
+
+                    if [ -z "${seen_calls[$call_id]}" ]; then
+                        seen_calls[$call_id]=$current_time
+                        echo -e "${YELLOW}[$timestamp]${NC} ${GREEN}[$bus_type]${NC} ${BLUE}$cmdline${NC} -> \"$service_name\" \"$path\" \"$interface\""
+                    fi
                 fi
             fi
         fi
