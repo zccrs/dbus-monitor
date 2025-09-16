@@ -1031,8 +1031,11 @@ monitor_bus() {
             if [ "$is_filtered_mode" = true ]; then
                 # 使用monitor_login1_release_session_simple.sh的输出格式
                 local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-                echo "[$timestamp] $FILTER_INTERFACE method call detected"
-                
+                if [ -n "$FILTER_INTERFACE" ]; then
+                    echo "[$timestamp] $FILTER_INTERFACE method call detected"
+                else
+                    echo "[$timestamp] method call detected"
+                fi
                 # 提取sender从行中
                 local sender
                 if [[ "$line" =~ sender=([^[:space:]]+) ]]; then
@@ -1045,9 +1048,9 @@ monitor_bus() {
                         local pid
                         # 使用busctl如果可用，否则使用dbus-send
                         if command -v busctl >/dev/null; then
-                            pid=$(busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$sender" 2>/dev/null | grep -o '[0-9]\+')
+                            pid=$(busctl --$bus_type call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$sender" 2>/dev/null | grep -o '[0-9]\+')
                         else
-                            pid=$(dbus-send --print-reply --system --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:"$sender" 2>/dev/null | grep uint32 | awk '{print $3}')
+                            pid=$(dbus-send --print-reply --$bus_type --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:"$sender" 2>/dev/null | grep uint32 | awk '{print $3}')
                         fi
                         echo "  Found PID: '$pid'"
                         if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
