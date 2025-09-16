@@ -504,8 +504,6 @@ show_usage() {
     echo "选项:"
     echo "  -s, --system    只监控系统总线 (需要 root 权限)"
     echo "  -u, --user      只监控用户会话总线"
-    echo "  --session       只监控用户级服务（会话总线）"
-    echo "  --system        只监控系统级服务（系统总线）"
     echo "  -n <名称>       指定要监控的BUS名称 (默认: 监控所有)"
     echo "  -p <路径>       指定要监控的对象路径 (默认: 监控所有)"
     echo "  -i <接口>       指定要监控的接口 (默认: 监控所有)"
@@ -536,16 +534,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -u|--user)
             MONITOR_SYSTEM=false
-            shift
-            ;;
-        --session)
-            MONITOR_SYSTEM=false
-            MONITOR_SESSION=true
-            shift
-            ;;
-        --system)
-            MONITOR_SESSION=false
-            MONITOR_SYSTEM=true
             shift
             ;;
         -n)
@@ -1031,11 +1019,7 @@ monitor_bus() {
             if [ "$is_filtered_mode" = true ]; then
                 # 使用monitor_login1_release_session_simple.sh的输出格式
                 local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-                if [ -n "$FILTER_INTERFACE" ]; then
-                    echo "[$timestamp] $FILTER_INTERFACE method call detected"
-                else
-                    echo "[$timestamp] method call detected"
-                fi
+                echo "[$timestamp] $FILTER_INTERFACE method call detected"
                 # 提取sender从行中
                 local sender
                 if [[ "$line" =~ sender=([^[:space:]]+) ]]; then
@@ -1048,9 +1032,9 @@ monitor_bus() {
                         local pid
                         # 使用busctl如果可用，否则使用dbus-send
                         if command -v busctl >/dev/null; then
-                            pid=$(busctl --$bus_type call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$sender" 2>/dev/null | grep -o '[0-9]\+')
+                            pid=$(busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$sender" 2>/dev/null | grep -o '[0-9]\+')
                         else
-                            pid=$(dbus-send --print-reply --$bus_type --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:"$sender" 2>/dev/null | grep uint32 | awk '{print $3}')
+                            pid=$(dbus-send --print-reply --system --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:"$sender" 2>/dev/null | grep uint32 | awk '{print $3}')
                         fi
                         echo "  Found PID: '$pid'"
                         if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
@@ -1129,16 +1113,27 @@ show_usage() {
     echo "选项:"
     echo "  -s, --system    只监控系统总线 (需要 root 权限)"
     echo "  -u, --user      只监控用户会话总线"
+    echo "  -n <名称>       指定要监控的BUS名称 (默认: 监控所有)"
+    echo "  -p <路径>       指定要监控的对象路径 (默认: 监控所有)"
+    echo "  -i <接口>       指定要监控的接口 (默认: 监控所有)"
+    echo "  -m <方法>       指定要监控的方法 (默认: 监控所有)"
     echo "  -h, --help      显示此帮助信息"
     echo ""
     echo "不带参数运行时:"
     echo "- 如果有 root 权限，将同时监控系统总线和会话总线"
     echo "- 如果没有 root 权限，将只监控会话总线"
+    echo ""
+    echo "使用 -n/-p/-i/-m 参数时，将只监控匹配的DBus调用"
 }
 
 # 参数解析
 MONITOR_SYSTEM=true
 MONITOR_SESSION=true
+# 新增过滤参数
+FILTER_BUS_NAME=""
+FILTER_OBJECT_PATH=""
+FILTER_INTERFACE=""
+FILTER_METHOD=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -1149,6 +1144,22 @@ while [[ $# -gt 0 ]]; do
         -u|--user)
             MONITOR_SYSTEM=false
             shift
+            ;;
+        -n)
+            FILTER_BUS_NAME="$2"
+            shift 2
+            ;;
+        -p)
+            FILTER_OBJECT_PATH="$2"
+            shift 2
+            ;;
+        -i)
+            FILTER_INTERFACE="$2"
+            shift 2
+            ;;
+        -m)
+            FILTER_METHOD="$2"
+            shift 2
             ;;
         -h|--help)
             show_usage
